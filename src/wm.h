@@ -38,7 +38,13 @@ extern Atom
 	// EWMH atoms
 	_NET_CLOSE_WINDOW,
 	_NET_WM_STATE,
-	_NET_WM_STATE_SHADED;
+	_NET_WM_STATE_SHADED,
+	_NET_ACTIVE_WINDOW,
+	_NET_WM_ICON,
+	_NET_CURRENT_DESKTOP,
+
+	// Other atoms
+	KWM_WIN_ICON;
 
 /// Structure representing Window property value.
 typedef struct {
@@ -83,27 +89,28 @@ void wm_set_fullscreen(session_t *ps, Window window,
 		int x, int y, unsigned width, unsigned height);
 bool wm_validate_window(session_t *ps, Window wid);
 long wm_get_window_desktop(session_t *ps, Window wid);
-Window wm_get_focused(Display *dpy);
+Window wm_get_focused(session_t *ps);
 
 char *wm_wid_get_prop_rstr(session_t *ps, Window wid, Atom prop);
 char *wm_wid_get_prop_utf8(session_t *ps, Window wid, Atom prop);
+bool wm_wid_set_prop_utf8(session_t *ps, Window wid, Atom prop, char *text);
 void wm_wid_set_info(session_t *ps, Window wid, const char *name,
 		Atom window_type);
 void wm_send_clientmsg(session_t *ps, Window twid, Window wid, Atom msg_type,
 		int fmt, long event_mask, int len, const unsigned char *data);
 
 static inline void
-wm_send_clientmsg_iccwm(session_t *ps, Window wid, Atom msg_type,
+wm_send_clientmsg_icccm(session_t *ps, Window wid, Atom msg_type,
 		int len, const long *data) {
 	wm_send_clientmsg(ps, wid, wid, msg_type, 32, NoEventMask, len,
 			(const unsigned char *) data);
 }
 
 static inline void
-wm_close_window_iccwm(session_t *ps, Window wid) {
+wm_close_window_icccm(session_t *ps, Window wid) {
 	long data[] = { WM_DELETE_WINDOW, CurrentTime };
-	wm_send_clientmsg_iccwm(ps, wid, WM_PROTOCOLS,
-			sizeof(data) / sizeof(data[0]), data);
+	wm_send_clientmsg_icccm(ps, wid, WM_PROTOCOLS,
+			CARR_LEN(data), data);
 }
 
 static inline void
@@ -125,7 +132,38 @@ static inline void
 wm_shade_window_ewmh(session_t *ps, Window wid) {
 	long data[] = { 2, _NET_WM_STATE_SHADED };
 	wm_send_clientmsg_ewmh_root(ps, wid, _NET_WM_STATE,
-			sizeof(data) / sizeof(data[0]), data);
+			CARR_LEN(data), data);
+}
+
+static inline void
+wm_activate_window_ewmh(session_t *ps, Window wid) {
+	long data[] = { 2, CurrentTime, 0 };
+	wm_send_clientmsg_ewmh_root(ps, wid, _NET_ACTIVE_WINDOW,
+			CARR_LEN(data), data);
+}
+
+static inline void
+wm_set_desktop_ewmh(session_t *ps, long desktop) {
+	long data[] = { desktop, CurrentTime };
+	wm_send_clientmsg_ewmh_root(ps, ps->root, _NET_CURRENT_DESKTOP,
+			CARR_LEN(data), data);
+}
+
+/**
+ * Activate a window using whatever the approach we love.
+ */
+static inline void
+wm_activate_window(session_t *ps, Window wid) {
+	if (!wid) return;
+
+	if (ps->o.switchDesktopOnActivate) {
+		long tgt = wm_get_window_desktop(ps, wid);
+		if (tgt >= 0)
+			wm_set_desktop_ewmh(ps, tgt);
+	}
+	// Order is important, to avoid "intelligent" WMs fixing our focus stealing
+	wm_activate_window_ewmh(ps, wid);
+	XSetInputFocus(ps->dpy, wid, RevertToParent, CurrentTime);
 }
 
 Window wm_find_frame(session_t *ps, Window wid);

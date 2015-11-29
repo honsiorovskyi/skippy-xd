@@ -57,14 +57,19 @@ mainwin_create(session_t *ps) {
 	XWindowAttributes rootattr;
 	XRenderPictureAttributes pa;
 	XRenderColor clear;
-	
+
+	// Get ARGB visual.
+	// FIXME: Move this to skippy.c?
+	if (!ps->argb_visual)
+		ps->argb_visual = find_argb_visual(dpy, ps->screen);
+
 	// calloc() makes sure it's filled with zero
 	MainWin *mw = allocchk(calloc(1, sizeof(MainWin)));
-	
+
 	mw->ps = ps;
 	if (ps->o.lazyTrans) {
 		mw->depth  = 32;
-		mw->visual = find_argb_visual(dpy, DefaultScreen(dpy));
+		mw->visual = ps->argb_visual;
 		if (!mw->visual) {
 			printfef("(): Couldn't find ARGB visual, lazy transparency can't work.");
 			goto mainwin_create_err;
@@ -284,18 +289,20 @@ mainwin_map(MainWin *mw) {
 	session_t *ps = mw->ps;
 
 	wm_set_fullscreen(ps, mw->window, mw->x, mw->y, mw->width, mw->height);
-	mw->pressed = 0;
+	mw->pressed = NULL;
+	mw->pressed_key = mw->pressed_mouse = false;
 	XMapWindow(ps->dpy, mw->window);
 	XRaiseWindow(ps->dpy, mw->window);
 
 	// Might because of WM reparent, XSetInputFocus() doesn't work here
+	// Focus is already on mini window?
 	XSetInputFocus(ps->dpy, mw->window, RevertToParent, CurrentTime);
-	{
+	/* {
 		int ret = XGrabKeyboard(ps->dpy, mw->window, True, GrabModeAsync,
 				GrabModeAsync, CurrentTime);
 		if (Success != ret)
 			printfef("(): Failed to grab keyboard (%d), troubles ahead.", ret);
-	}
+	} */
 }
 
 void
@@ -315,6 +322,9 @@ mainwin_unmap(MainWin *mw)
 void
 mainwin_destroy(MainWin *mw) {
 	session_t *ps = mw->ps; 
+
+	// Free all clients associated with this main window
+	dlist_free_with_func(mw->clients, (dlist_free_func) clientwin_destroy);
 
 	if(mw->tooltip)
 		tooltip_destroy(mw->tooltip);
@@ -365,38 +375,32 @@ int
 mainwin_handle(MainWin *mw, XEvent *ev) {
 	session_t *ps = mw->ps;
 
-	switch(ev->type)
-	{
-	case KeyPress:
-		mw->pressed_key = true;
-		break;
-	case KeyRelease:
-		if (mw->pressed_key)
-			report_key_unbinded(ev);
-		else
-			report_key_ignored(ev);
-		break;
-	case ButtonPress:
-		mw->pressed_mouse = true;
-		break;
-	case ButtonRelease:
-		if (mw->pressed_mouse) {
-			printfef("(): Detected mouse button release on main window, "
-					"exiting.");
-			return 1;
-		}
-		else
-			printfef("(): ButtonRelease %u ignored.", ev->xbutton.button);
-		break;
-	case VisibilityNotify:
-		if(ev->xvisibility.state && mw->focus)
-		{
-			XSetInputFocus(ps->dpy, mw->focus->mini.window, RevertToParent, CurrentTime);
-			mw->focus = 0;
-		}
-		break;
-	default:
-		;
+	switch(ev->type) {
+		case EnterNotify:
+			XSetInputFocus(ps->dpy, mw->window, RevertToParent, CurrentTime);
+			break;
+		case KeyPress:
+			mw->pressed_key = true;
+			break;
+		case KeyRelease:
+			if (mw->pressed_key)
+				report_key_unbinded(ev);
+			else
+				report_key_ignored(ev);
+			break;
+		case ButtonPress:
+			mw->pressed_mouse = true;
+			break;
+		case ButtonRelease:
+			if (mw->pressed_mouse) {
+				printfef("(): Detected mouse button release on main window, "
+						"exiting.");
+				return 1;
+			}
+			else
+				printfef("(): ButtonRelease %u ignored.", ev->xbutton.button);
+			break;
 	}
+
 	return 0;
 }

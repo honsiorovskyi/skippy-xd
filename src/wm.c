@@ -25,7 +25,6 @@ Atom
 	ESETROOT_PMAP_ID,
 
 	// ICCWM atoms
-	WM_STATE,
 	WM_PROTOCOLS,
 	WM_DELETE_WINDOW,
 
@@ -38,7 +37,13 @@ Atom
 	// EWMH atoms
 	_NET_CLOSE_WINDOW,
 	_NET_WM_STATE,
-	_NET_WM_STATE_SHADED;
+	_NET_WM_STATE_SHADED,
+	_NET_ACTIVE_WINDOW,
+	_NET_WM_ICON,
+	_NET_CURRENT_DESKTOP,
+
+	// Other atoms
+	KWM_WIN_ICON;
 
 static Atom
 	/* Generic atoms */
@@ -46,13 +51,12 @@ static Atom
 	WM_CLIENT_LEADER,
 	XA_UTF8_STRING,
 
-	/* NetWM atoms */
+	/* EWMH atoms */
 	_NET_SUPPORTING_WM_CHECK,
 	_NET_SUPPORTED,
 	_NET_NUMBER_OF_DESKTOPS,
 	_NET_CLIENT_LIST,
 	_NET_CLIENT_LIST_STACKING,
-	_NET_CURRENT_DESKTOP,
 	_NET_WM_DESKTOP,
 	_NET_WM_STATE_HIDDEN,
 	_NET_WM_STATE_SKIP_TASKBAR,
@@ -115,7 +119,6 @@ wm_get_atoms(session_t *ps) {
 	T_GETATOM(_XROOTPMAP_ID);
 	T_GETATOM(ESETROOT_PMAP_ID);
 	
-	T_GETATOM(WM_STATE),
 	T_GETATOM(WM_PROTOCOLS),
 	T_GETATOM(WM_DELETE_WINDOW),
 
@@ -140,9 +143,13 @@ wm_get_atoms(session_t *ps) {
 	T_GETATOM(_NET_WM_WINDOW_TYPE_TOOLTIP);
 	T_GETATOM(_NET_WM_VISIBLE_NAME);
 	T_GETATOM(_NET_WM_NAME);
+	T_GETATOM(_NET_ACTIVE_WINDOW);
 	T_GETATOM(_NET_CLOSE_WINDOW);
 	T_GETATOM(_NET_WM_STATE_SHADED);
-	
+	T_GETATOM(_NET_WM_ICON);
+
+	T_GETATOM(KWM_WIN_ICON);
+
 	T_GETATOM(_WIN_SUPPORTING_WM_CHECK);
 	T_GETATOM(_WIN_WORKSPACE);
 	T_GETATOM(_WIN_WORKSPACE_COUNT);
@@ -287,7 +294,7 @@ wm_find_client(session_t *ps, Window wid) {
 		dlist *stack2 = NULL;
 		foreach_dlist (stack) {
 			Window cur = (Window) iter->data;
-			if (wid_has_prop(ps, cur, WM_STATE)) {
+			if (wid_has_prop(ps, cur, XA_WM_STATE)) {
 				result = cur;
 				break;
 			}
@@ -532,10 +539,12 @@ wm_validate_window(session_t *ps, Window wid) {
 
 	// Check _NET_WM_WINDOW_TYPE
 	prop = wid_get_prop(ps, wid, _NET_WM_WINDOW_TYPE, 1, XA_ATOM, 32);
-	long v = winprop_get_int(&prop);
-	if ((_NET_WM_WINDOW_TYPE_DESKTOP == v
-				|| _NET_WM_WINDOW_TYPE_DOCK == v))
-		result = false;
+	{
+		long v = winprop_get_int(&prop);
+		if ((_NET_WM_WINDOW_TYPE_DESKTOP == v
+					|| _NET_WM_WINDOW_TYPE_DOCK == v))
+			result = false;
+	}
 	free_winprop(&prop);
 
 	if (!result) return result;
@@ -545,7 +554,7 @@ wm_validate_window(session_t *ps, Window wid) {
 		prop = wid_get_prop(ps, wid, _NET_WM_STATE, 8192, XA_ATOM, 32);
 		for (int i = 0; result && i < prop.nitems; i++) {
 			long v = prop.data32[i];
-			if (_NET_WM_STATE_HIDDEN == v)
+			if (!ps->o.showUnmapped && _NET_WM_STATE_HIDDEN == v)
 				result = false;
 			else if (ps->o.ignoreSkipTaskbar
 					&& _NET_WM_STATE_SKIP_TASKBAR == v)
@@ -559,7 +568,7 @@ wm_validate_window(session_t *ps, Window wid) {
 	else if (WMPSN_GNOME == ps->wmpsn) {
 		// Check _WIN_STATE
 		prop = wid_get_prop(ps, wid, _WIN_STATE, 1, XA_CARDINAL, 0);
-		if (winprop_get_int(&prop)
+		if (!ps->o.showUnmapped && winprop_get_int(&prop)
 				& (WIN_STATE_MINIMIZED | WIN_STATE_SHADED | WIN_STATE_HIDDEN))
 			result = false;
 		free_winprop(&prop);
@@ -593,6 +602,8 @@ wm_get_window_desktop(session_t *ps, Window wid) {
 	prop = wid_get_prop(ps, wid, _NET_WM_DESKTOP, 1, XA_CARDINAL, 0);
 	if (prop.nitems)
 		desktop = winprop_get_int(&prop);
+	if ((long) 0xFFFFFFFFL == desktop)
+		desktop = -1;
 	free_winprop(&prop);
 	if (LONG_MIN != desktop) return desktop;
 
@@ -607,33 +618,46 @@ wm_get_window_desktop(session_t *ps, Window wid) {
 
 /* Get focused window and traverse towards the root window until a window with WM_STATE is found */
 Window
-wm_get_focused(Display *dpy)
-{
-	Window focused = None, root = None, *children;
-	unsigned int tmp_u;
-	int revert_to, status, real_format;
-	Atom real_type;
-	unsigned long items_read, items_left;
-	unsigned char *data;
-	
-	XGetInputFocus(dpy, &focused, &revert_to);
-	
-	while(focused != None && focused != root)
+wm_get_focused(session_t *ps) {
+	Window focused = None;
+
 	{
-		status = XGetWindowProperty(dpy, focused, XA_WM_STATE,
-		                            0L, 1L, False, XA_WM_STATE, &real_type, &real_format,
-		                            &items_read, &items_left, &data);
-		if(status == Success)
-		{
-			XFree(data);
-			if(items_read)
-				break;
+		int revert_to = 0;
+		if (!XGetInputFocus(ps->dpy, &focused, &revert_to)) {
+			printfef("(): Failed to get current focused window.");
+			return None;
 		}
-		XQueryTree(dpy, focused, &root, &focused, &children, &tmp_u);
-		if(children)
-			XFree(children);
+		// printfdf("(): Focused window is %#010lx.", focused);
 	}
-	
+
+	while (focused) {
+		// Discard insane values
+		if (ps->root == focused || PointerRoot == focused)
+			return None;
+
+		// Check for WM_STATE
+		if (wid_has_prop(ps, focused, XA_WM_STATE))
+			return focused;
+
+		// Query window parent
+		{
+			Window rroot = None, parent = None;
+			Window *children = NULL;
+			unsigned int nchildren = 0;
+
+			Status status =
+				XQueryTree(ps->dpy, focused, &rroot, &parent, &children, &nchildren);
+			sxfree(children);
+			if (!status) {
+				printfef("(): Failed to get parent window of %#010lx.", focused);
+				return None;
+			}
+			// printfdf("(): Parent window of %#010lx is %#010lx.", focused, parent);
+			focused = parent;
+			assert(ps->root == rroot);
+		}
+	}
+
 	return focused;
 }
 
@@ -799,18 +823,18 @@ wid_get_prop_adv(const session_t *ps, Window w, Atom atom, long offset,
   unsigned long nitems = 0, after = 0;
   unsigned char *data = NULL;
 
-  if (Success == XGetWindowProperty(ps->dpy, w, atom, offset, length,
-        False, rtype, &type, &format, &nitems, &after, &data)
-      && nitems && (AnyPropertyType == type || type == rtype)
-      && (!rformat || format == rformat)
-      && (8 == format || 16 == format || 32 == format)) {
-      return (winprop_t) {
-        .data8 = data,
-        .nitems = nitems,
-        .type = type,
-        .format = format,
-      };
-  }
+	if (Success == XGetWindowProperty(ps->dpy, w, atom, offset, length,
+				False, rtype, &type, &format, &nitems, &after, &data)
+			&& nitems && (AnyPropertyType == type || type == rtype)
+			&& (!rformat || format == rformat)
+			&& (8 == format || 16 == format || 32 == format)) {
+		return (winprop_t) {
+			.data8 = data,
+			.nitems = nitems,
+			.type = type,
+			.format = format,
+		};
+	}
 
   sxfree(data);
 

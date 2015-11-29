@@ -1,6 +1,21 @@
 #include "skippy.h"
 #include <gif_lib.h>
 
+// Global error flag on >=giflib-4.2 before giflib-5.0
+#if defined(GIFLIB_MAJOR) && GIFLIB_MAJOR == 4 && defined(GIFLIB_MINOR) && GIFLIB_MINOR >= 2
+#define SGIF_HAS_ERROR
+#endif
+
+// Thread-safe error flag on >=giflib-5.0
+#if defined(GIFLIB_MAJOR) && GIFLIB_MAJOR >= 5
+#define SGIF_THREADSAFE
+#endif
+
+// More thread-safe error flag on >=giflib-5.1
+#if defined(GIFLIB_MAJOR) && GIFLIB_MAJOR >= 5 && defined(GIFLIB_MINOR) && GIFLIB_MINOR >= 1
+#define SGIF_THREADSAFE_510
+#endif
+
 pictw_t *
 sgif_read(session_t *ps, const char *path) {
 	assert(path);
@@ -9,10 +24,22 @@ sgif_read(session_t *ps, const char *path) {
 	unsigned char *tdata = NULL;
 
 	GifRecordType rectype;
-	int ret = 0;
+	int ret = 0, err = 0;
+	const char *errstr = NULL;
+#ifdef SGIF_THREADSAFE
+	GifFileType *f = DGifOpenFileName(path, &err);
+#else
 	GifFileType *f = DGifOpenFileName(path);
+#endif
 	if (unlikely(!f)) {
-		printfef("(\"%s\"): Failed to open file.", path);
+#ifdef SGIF_HAS_ERROR
+		err = GifError();
+		errstr = GifErrorString();
+#endif
+#ifdef SGIF_THREADSAFE
+		errstr = GifErrorString(err);
+#endif
+		printfef("(\"%s\"): Failed to open file: %d (%s)", path, err, errstr);
 		goto sgif_read_end;
 	}
 
@@ -86,7 +113,7 @@ sgif_read(session_t *ps, const char *path) {
 	}
 
 	// Colormap translation
-	int depth = (transp >= 0 ? 32: 24);
+	int depth = 32;
 	{
 		ColorMapObject *cmap = f->Image.ColorMap;
 		if (!cmap) cmap = f->SColorMap;
@@ -106,15 +133,16 @@ sgif_read(session_t *ps, const char *path) {
 					if (32 == depth) p[3] = 0;
 					continue;
 				}
-				p[0] = cmap->Colors[*pd].Red;
+				p[0] = cmap->Colors[*pd].Blue;
 				p[1] = cmap->Colors[*pd].Green;
-				p[2] = cmap->Colors[*pd].Blue;
+				p[2] = cmap->Colors[*pd].Red;
 				p[3] = 0xff;
 			}
 		}
 	}
-	if (unlikely(!(pictw = simg_data_to_pictw(ps, width, height, depth,
-						tdata, 0)))) {
+	pictw = simg_data_to_pictw(ps, width, height, depth, tdata, 0);
+	free(tdata);
+	if (unlikely(!pictw)) {
 		printfef("(\"%s\"): Failed to create Picture.", path);
 		goto sgif_read_end;
 	}
@@ -122,8 +150,14 @@ sgif_read(session_t *ps, const char *path) {
 sgif_read_end:
 	if (data)
 		free(data);
-	if (likely(f))
+	if (likely(f)) {
+#ifdef SGIF_THREADSAFE_510
+		int error_code = 0;
+		DGifCloseFile(f, &error_code);
+#else
 		DGifCloseFile(f);
+#endif
+	}
 
 	return pictw;
 }

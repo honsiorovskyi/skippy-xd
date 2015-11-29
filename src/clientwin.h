@@ -29,29 +29,33 @@ typedef struct {
 
 #define SKIPPYWINT_INIT { .window = None }
 
-struct _MainWin;
-typedef struct {
-	struct _MainWin *mainwin;
+struct _clientwin_t {
+	MainWin *mainwin;
 
+	client_disp_mode_t mode;
 	Window wid_client;
 	SkippyWindow src;
 	bool redirected;
 	Pixmap cpixmap;
+	pictw_t *pict_filled;
+	pictw_t *icon_pict;
+	pictw_t *icon_pict_filled;
+
 	SkippyWindow mini;
-	
+
 	Pixmap pixmap;
 	Picture origin, destination;
 	Damage damage;
 	float factor;
-	
-	int focused;
-	
+
+	bool focused;
+
 	bool damaged;
 	/* XserverRegion repair; */
 	
 	/* These are virtual positions set by the layout routine */
 	int x, y;
-} ClientWin;
+};
 
 #define CLIENTWT_INIT { \
 	.src = SKIPPYWINT_INIT, \
@@ -59,19 +63,64 @@ typedef struct {
 	.mainwin = NULL \
 }
 
+static inline client_disp_mode_t
+clientwin_get_disp_mode(session_t *ps, ClientWin *cw) {
+	XWindowAttributes wattr = { };
+	XGetWindowAttributes(ps->dpy, cw->src.window, &wattr);
+
+	if (!ps->o.showUnmapped && IsViewable != wattr.map_state)
+		return CLIDISP_NONE;
+
+	for (client_disp_mode_t *p = ps->o.clientDisplayModes; *p; p++) {
+		switch (*p) {
+			case CLIDISP_THUMBNAIL_ICON:
+				if (IsViewable == wattr.map_state && cw->origin && cw->icon_pict)
+					return *p;
+				break;
+			case CLIDISP_THUMBNAIL:
+				if (IsViewable == wattr.map_state && cw->origin) return *p;
+				break;
+			case CLIDISP_ICON:
+				if (cw->icon_pict) return *p;
+				break;
+			case CLIDISP_FILLED:
+			case CLIDISP_NONE:
+				return *p;
+		}
+	}
+
+	return CLIDISP_NONE;
+}
+
+static inline void
+clientwin_free_res2(session_t *ps, ClientWin *cw) {
+	free_pictw(ps, &cw->icon_pict_filled);
+	free_pictw(ps, &cw->pict_filled);
+}
+
+static inline void
+clientwin_free_res(session_t *ps, ClientWin *cw) {
+	clientwin_free_res2(ps, cw);
+	free_pixmap(ps, &cw->cpixmap);
+	free_picture(ps, &cw->origin);
+	free_pictw(ps, &cw->icon_pict);
+}
+
 int clientwin_validate_func(dlist *, void *);
 int clientwin_sort_func(dlist *, dlist *, void *);
-ClientWin *clientwin_create(struct _MainWin *, Window);
+ClientWin *clientwin_create(MainWin *, Window);
 void clientwin_destroy(ClientWin *, bool destroyed);
 void clientwin_move(ClientWin *, float, int, int);
 void clientwin_map(ClientWin *);
 void clientwin_unmap(ClientWin *);
 int clientwin_handle(ClientWin *, XEvent *);
 int clientwin_cmp_func(dlist *, void*);
-void clientwin_update(ClientWin *cw);
+bool clientwin_update(ClientWin *cw);
+bool clientwin_update2(ClientWin *cw);
 int clientwin_check_group_leader_func(dlist *l, void *data);
 void clientwin_render(ClientWin *);
 void clientwin_schedule_repair(ClientWin *cw, XRectangle *area);
 void clientwin_repair(ClientWin *cw);
+void childwin_focus(ClientWin *cw);
 
 #endif /* SKIPPY_CLIENT_H */

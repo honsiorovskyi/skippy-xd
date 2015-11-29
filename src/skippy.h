@@ -57,7 +57,6 @@
 #include <math.h>
 #include <unistd.h>
 #include <time.h>
-#include <regex.h>
 #include <string.h>
 #include <inttypes.h>
 #include <ctype.h>
@@ -113,6 +112,8 @@ enum {
 enum progmode {
 	PROGMODE_NORMAL,
 	PROGMODE_ACTV_PICKER,
+	PROGMODE_DEACTV_PICKER,
+	PROGMODE_TOGGLE_PICKER,
 	PROGMODE_DM_STOP,
 };
 
@@ -121,7 +122,7 @@ enum cliop {
 	CLIENTOP_FOCUS,
 	CLIENTOP_ICONIFY,
 	CLIENTOP_SHADE_EWMH,
-	CLIENTOP_CLOSE_ICCWM,
+	CLIENTOP_CLOSE_ICCCM,
 	CLIENTOP_CLOSE_EWMH,
 	CLIENTOP_DESTROY,
 };
@@ -143,6 +144,8 @@ enum pict_posp_mode {
 	PICTPOSP_ORIG,
 	PICTPOSP_SCALE,
 	PICTPOSP_SCALEK,
+	PICTPOSP_SCALEE,
+	PICTPOSP_SCALEEK,
 	PICTPOSP_TILE,
 };
 
@@ -153,7 +156,16 @@ typedef enum {
 } wmpsn_t;
 
 typedef struct {
+	Pixmap pxmap;
+	Picture pict;
+	int height;
+	int width;
+	int depth;
+} pictw_t;
+
+typedef struct {
 	char *path;
+	pictw_t *img;
 	enum pict_posp_mode mode;
 	int twidth;
 	int theight;
@@ -167,12 +179,21 @@ typedef struct {
 }
 
 typedef struct {
-	Pixmap pxmap;
-	Picture pict;
-	int height;
-	int width;
-	int depth;
-} pictw_t;
+	unsigned int key;
+	enum {
+		KEYMOD_CTRL = 1 << 0,
+		KEYMOD_SHIFT = 1 << 1,
+		KEYMOD_META = 1 << 2,
+	} mod;
+} keydef_t;
+
+typedef enum {
+	CLIDISP_NONE,
+	CLIDISP_FILLED,
+	CLIDISP_ICON,
+	CLIDISP_THUMBNAIL,
+	CLIDISP_THUMBNAIL_ICON,
+} client_disp_mode_t;
 
 /// @brief Option structure.
 typedef struct {
@@ -189,12 +210,23 @@ typedef struct {
 	double updateFreq;
 	bool lazyTrans;
 	bool useNameWindowPixmap;
+	bool forceNameWindowPixmap;
 	bool includeFrame;
 	char *pipePath;
 	bool movePointerOnStart;
 	bool movePointerOnSelect;
 	bool movePointerOnRaise;
+	bool switchDesktopOnActivate;
+	bool allowUpscale;
 	bool includeAllScreens;
+	bool avoidThumbnailsFromOtherScreens;
+	bool showAllDesktops;
+	bool showUnmapped;
+	int preferredIconSize;
+	client_disp_mode_t *clientDisplayModes;
+	pictspec_t iconFillSpec;
+	pictw_t *iconDefault;
+	pictspec_t fillSpec;
 	char *buttonImgs[NUM_BUTN];
 	pictw_t *background;
 
@@ -237,15 +269,25 @@ typedef struct {
 	.updateFreq = 10.0, \
 	.lazyTrans = false, \
 	.useNameWindowPixmap = false, \
+	.forceNameWindowPixmap = false, \
 	.includeFrame = false, \
 	.pipePath = NULL, \
 	.movePointerOnStart = true, \
 	.movePointerOnSelect = true, \
 	.movePointerOnRaise = true, \
+	.switchDesktopOnActivate = false, \
+	.allowUpscale = true, \
 	.includeAllScreens = false, \
+	.avoidThumbnailsFromOtherScreens = true, \
+	.preferredIconSize = 48, \
+	.clientDisplayModes = NULL, \
+	.iconFillSpec = PICTSPECT_INIT, \
+	.fillSpec = PICTSPECT_INIT, \
+	.showAllDesktops = false, \
+	.showUnmapped = true, \
 	.buttonImgs = { NULL }, \
 	.background = NULL, \
-	.xinerama_showAll = false, \
+	.xinerama_showAll = true, \
 	.normal_tint = NULL, \
 	.normal_tintOpacity = 0, \
 	.normal_opacity = 200, \
@@ -285,6 +327,9 @@ typedef struct {
 	.xinerama_exist = false, \
 }
 
+typedef struct _clientwin_t ClientWin;
+typedef struct _mainwin_t MainWin;
+
 /// @brief Session global info structure.
 typedef struct {
 	/// @brief Program options.
@@ -303,12 +348,19 @@ typedef struct {
 	wmpsn_t wmpsn;
 	/// @brief Whether we have EWMH fullscreen support.
 	bool has_ewmh_fullscreen;
+	/// @brief ARGB visual of the current screen.
+	Visual *argb_visual;
+	/// @brief File descriptor of command pipe, in daemon mode.
+	int fd_pipe;
+	/// @brief Main window.
+	MainWin *mainwin;
 } session_t;
 
 #define SESSIONT_INIT { \
 	.o = OPTIONST_INIT, \
 	.xinfo = XINFOT_INIT, \
 	.time_start = { .tv_sec = 0, .tv_usec = 0 }, \
+	.fd_pipe = -1, \
 }
 
 /// @brief Print out a debug message.
@@ -351,6 +403,15 @@ allocchk_(void *ptr, const char *func_name) {
 /// @brief Wrapper of allocchk_().
 #define allocchk(ptr) allocchk_(ptr, __func__)
 
+/// @brief Wrapper of malloc().
+#define smalloc(nmemb, type) ((type *) allocchk(malloc((nmemb) * sizeof(type))))
+
+/// @brief Wrapper of calloc().
+#define scalloc(nmemb, type) ((type *) allocchk(calloc((nmemb), sizeof(type))))
+
+/// @brief Wrapper of ralloc().
+#define srealloc(ptr, nmemb, type) ((type *) allocchk(realloc((ptr), (nmemb) * sizeof(type))))
+
 /// @brief Return the case string.
 /// Use #s here to prevent macro expansion
 #define CASESTRRET(s)   case s: return #s
@@ -360,8 +421,10 @@ allocchk_(void *ptr, const char *func_name) {
 
 #define MAX(a,b) (((a) > (b)) ? (a) : (b))
 #define MIN(a,b) (((a) > (b)) ? (b) : (a))
-#define foreach_dlist(l) \
-	for (dlist *iter = dlist_first(l); iter; iter = iter->next)
+
+#define foreach_dlist_vn(itervar, l) \
+	for (dlist *(itervar) = dlist_first(l); (itervar); (itervar) = (itervar)->next)
+#define foreach_dlist(l) foreach_dlist_vn(iter, l)
 #define REDUCE(statement, l) \
 	do { \
 		foreach_dlist(l) \
@@ -426,6 +489,16 @@ print_timestamp(session_t *ps) {
 	timeval_subtract(&diff, &tm, &ps->time_start);
 
 	printf("[ %5ld.%02ld ] ", diff.tv_sec, diff.tv_usec / 10000);
+}
+
+/**
+ * @brief Allocate the space and copy some data.
+ */
+static inline unsigned char *
+mmemcpy(const unsigned char *data, int len) {
+	unsigned char *d = smalloc(len, unsigned char);
+	memcpy(d, data, len);
+	return d;
 }
 
 /**
@@ -505,7 +578,7 @@ str_endwith(const char *haystick, const char *needle) {
 }
 
 /**
- * @brief Check if a string starts with some words, ignore case.
+ * @brief Check if a string starts with some words.
  */
 static inline bool
 str_startswithword(const char *haystick, const char *needle) {
@@ -522,6 +595,26 @@ str_startswithwordi(const char *haystick, const char *needle) {
 	const int needle_len = strlen(needle);
 	return !strncasecmp(haystick, needle, needle_len)
 		&& isspace0(haystick[needle_len]);
+}
+
+/**
+ * @brief Get first word.
+ *
+ * @param dest place to store pointer to a copy of the first word
+ * @return start of next word
+ */
+static inline const char *
+str_get_word(const char *s, char **dest) {
+	*dest = NULL;
+	int i = 0;
+	while (isspace(s[i])) ++i;
+	int start = i;
+	while (!isspace0(s[i])) ++i;
+	if (i - start)
+		*dest = mstrncpy(s + start, i - start);
+	while (isspace(s[i])) ++i;
+	if (!s[i]) return NULL;
+	return &s[i];
 }
 
 /**
@@ -569,14 +662,6 @@ free_region(session_t *ps, XserverRegion *p) {
 	}
 }
 
-/**
- * @brief Destroy a <code>pictspec_t</code>.
- */
-static inline void
-free_pictspec(session_t *ps, pictspec_t *p) {
-	free(p->path);
-}
-
 static inline unsigned short
 alphaconv(int alpha) {
 	return MIN(alpha * 256, 65535);
@@ -603,6 +688,20 @@ spxfree(void *data) {
 }
 
 /**
+ * @brief Checks if a key event matches particular key and modifier
+ * combination.
+ */
+static inline bool
+ev_iskey(XKeyEvent *ev, const keydef_t *k) {
+	unsigned int mask = 0;
+	if (KEYMOD_CTRL & k->mod) mask |= ControlMask;
+	if (KEYMOD_SHIFT & k->mod) mask |= ShiftMask;
+	if (KEYMOD_META & k->mod) mask |= Mod1Mask;
+	return k->key == ev->keycode
+		&& (ev->state & (ControlMask | ShiftMask | Mod1Mask)) == mask;
+}
+
+/**
  * @brief Return a string representation for the keycode in a KeyEvent.
  */
 static inline const char *
@@ -618,14 +717,15 @@ ev_key_str(XKeyEvent *ev) {
 	printfef("(): KeyRelease %u (%s) not binded to anything.", \
 			(ev)->xkey.keycode, ev_key_str(&(ev)->xkey))
 
+#include "img.h"
 #include "wm.h"
-#include "clientwin.h"
 #include "mainwin.h"
+#include "clientwin.h"
 #include "layout.h"
 #include "focus.h"
 #include "config.h"
 #include "tooltip.h"
-#include "img.h"
+#include "img-xlib.h"
 #ifdef CFG_LIBPNG
 // FreeType uses setjmp.h and libpng-1.2 feels crazy about this...
 #define PNG_SKIP_SETJMP_CHECK 1
@@ -639,8 +739,5 @@ ev_key_str(XKeyEvent *ev) {
 #endif
 
 extern session_t *ps_g;
-
-#define ACTIVATE_WINDOW_PICKER 1
-#define EXIT_RUNNING_DAEMON 2
 
 #endif /* SKIPPY_H */

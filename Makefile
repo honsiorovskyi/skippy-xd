@@ -1,9 +1,9 @@
-PREFIX ?= /usr/local
+PREFIX ?= /usr
 BINDIR ?= ${PREFIX}/bin
 
 CC ?= gcc
 
-SRCS_RAW = skippy wm dlist mainwin clientwin layout focus config tooltip img
+SRCS_RAW = skippy wm dlist mainwin clientwin layout focus config tooltip img img-xlib
 PACKAGES = x11 xft xrender xcomposite xdamage xfixes
 
 # === Options ===
@@ -34,7 +34,7 @@ ifeq "$(CFG_DEV)" ""
 	CFLAGS ?= -DNDEBUG -O2 -D_FORTIFY_SOURCE=2
 else
 	CC = clang
-	CFLAGS += -ggdb # -Weverything -Wno-gnu -Wno-disabled-macro-expansion -Wno-padded
+	CFLAGS += -ggdb -Wshadow -Weverything -Wno-unused-parameter -Wno-conversion -Wno-sign-conversion -Wno-gnu -Wno-disabled-macro-expansion -Wno-padded -Wno-c11-extensions -Wno-sign-compare -Wno-vla -Wno-cast-align
 	export LD_ALTEXEC = /usr/bin/ld.gold
 	# Xinerama debugging
 	CPPFLAGS += -DDEBUG_XINERAMA
@@ -65,14 +65,15 @@ skippy-xd${EXESUFFIX}: ${OBJS}
 	${CC} ${LDFLAGS} -o skippy-xd${EXESUFFIX} ${OBJS} ${LIBS}
 
 clean:
-	rm -f ${BINS}
+	rm -f ${BINS} ${OBJS} src/.clang_complete
 
-install: ${BINS} skippy-xd.rc-default
-	install -d "${DESTDIR}${BINDIR}" "${DESTDIR}/etc/xdg/"
+install: ${BINS} skippy-xd.sample.rc
+	install -d "${DESTDIR}${BINDIR}/" "${DESTDIR}/etc/xdg/"
 	install -m 755 ${BINS} "${DESTDIR}${BINDIR}/"
-	install -m 644 skippy-xd.rc-default "${DESTDIR}/etc/xdg/skippy-xd.rc"
+	install -m 644 skippy-xd.sample.rc "${DESTDIR}/etc/xdg/skippy-xd.rc"
 
 uninstall:
+	# Should configuration file be removed?
 	rm -f $(foreach bin,$(BINS),"${DESTDIR}${BINDIR}/$(bin)")
 
 src/.clang_complete: Makefile
